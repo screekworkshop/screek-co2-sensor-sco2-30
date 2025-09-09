@@ -1,0 +1,265 @@
+# YAML Configuration Code for SCO2-30 Sensor
+# https://screek.io/sco2-30
+esphome:
+  name: screek-co2-sensor-30
+  comment: Screek CO2 Sensor SCO2-30
+  friendly_name: CO2 Sensor SCO2-30
+  name_add_mac_suffix: True
+  platformio_options:
+    board_build.flash_mode: dio
+  on_boot:
+    - priority: 200
+      then:
+        lambda: |-
+          std::string _lastSN = str_snake_case(get_mac_address().substr(6));
+          id(sn).publish_state("sco2_30-" + _lastSN);
+  project: 
+    name: SCREEK.CO2 Sensor SCO2-30
+    version: 25.09.09-A
+
+esp32:
+  board: lolin_c3_mini
+  framework:
+    type: esp-idf
+
+globals:
+   - id: last_co2_update_time
+     type: unsigned long
+     restore_value: no
+     initial_value: '0'
+   - id: last_co2
+     type: float
+     restore_value: no
+     initial_value: "-1"
+
+logger:
+
+api:
+  services:
+    - service: calibrate_sco2_value
+      variables:
+        new_co2_ppm: float
+      then:
+       - scd30.force_recalibration_with_reference:
+          value: !lambda 'return new_co2_ppm;'
+          id: sensor_scd30
+
+ota:
+  - platform: esphome
+    password: !secret sco2_30_ota_password
+
+web_server:
+  version: 3
+  port: 80
+
+wifi:
+  power_save_mode: HIGH
+  ap:
+    ssid: "CO2-SENSOR-SCO2-30"
+
+captive_portal:
+
+improv_serial:
+  
+text_sensor:
+  - platform: template
+    name: "SN"
+    id: sn
+    icon: mdi:alpha-s-box
+    entity_category: "diagnostic"
+    update_interval: never
+  - platform: template
+    name: "CO2 Level"
+    id: co2_level
+    icon: mdi:gauge
+    update_interval: never
+  - platform: template
+    name: "CO2 Status"
+    id: co2_status
+    icon: mdi:information
+    update_interval: never
+    disabled_by_default: true
+
+i2c:
+  sda: GPIO7
+  scl: GPIO11
+  scan: true
+  id: bus_a
+
+binary_sensor:
+  - platform: status
+    name: Online
+    id: ink_ha_connected
+
+sensor:
+  - platform: internal_temperature
+    name: "Internal Temperature"
+    unit_of_measurement: °C
+    device_class: TEMPERATURE
+    update_interval: 30s
+    entity_category: "diagnostic"
+  - platform: uptime
+    name: Uptime
+    id: sys_uptime
+    update_interval: 60s
+  - platform: wifi_signal 
+    name: RSSI
+    id: wifi_signal_db
+    update_interval: 60s
+    entity_category: "diagnostic"
+  - platform: template
+    id: esp_memory
+    icon: mdi:memory
+    name: ESP Free Memory
+    lambda: return heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024;
+    unit_of_measurement: 'kB'
+    state_class: measurement
+    entity_category: "diagnostic"
+    disabled_by_default: True
+    update_interval: 60s
+  - platform: scd30
+    id: sensor_scd30
+    co2:
+      id: co2_ppm
+      name: "SCD30 CO2"
+      on_value: # 更新状态
+        then:
+          - script.execute: update_co2_status
+          - script.execute: update_rebreathed_fraction
+      filters:
+        - lambda: !lambda |-
+            unsigned long time_diff = abs(static_cast<long long>(millis() - id(last_co2_update_time)));
+            unsigned long co2_update_interval = id(co2_refresh_rate).state * 1000;
+
+            if (time_diff <= co2_update_interval) {
+              float diff_co2 = abs(id(last_co2) - x);
+              if (diff_co2 > id(co2_delta_trigger).state){
+                ESP_LOGD("CO2 Update Check - Difference", 
+                  "Current CO2: %.2f ppm, Last CO2: %.2f ppm, Difference: %.2f ppm exceeds the minimum change threshold of %.2f ppm.", 
+                  x, id(last_co2), diff_co2, id(co2_delta_trigger).state);
+                id(last_co2_update_time) = millis();
+                id(last_co2) = x;
+                return x;
+              }
+              ESP_LOGD("CO2 Update Check - Timing", 
+                "Time since last update: %lu s, Required update interval: %lu s. Conditions not met, skipping update.", 
+                time_diff / 1000, co2_update_interval / 1000);
+              return {};
+            };
+
+            id(last_co2_update_time) = millis();
+            id(last_co2) = x;
+            return x;
+    temperature:
+      name: "SCD30 Temperature(Ref)"
+      entity_category: "diagnostic"
+    humidity:
+      name: "SCD30 Humidity(Ref)"
+      entity_category: "diagnostic"
+    automatic_self_calibration: false
+    update_interval: 2s
+  - platform: template
+    name: "Rebreathed Fraction"
+    id: rebreathed_fraction
+    unit_of_measurement: '%'
+    icon: mdi:air-filter
+    accuracy_decimals: 2
+    update_interval: never
+
+script:
+  - id: update_co2_status
+    mode: queued
+    then:
+      - lambda: |-
+          float v = id(co2_ppm).state;
+
+          if (v < 600) {
+            id(co2_level).publish_state("Excellent");
+          } else if (v < 800) {
+            id(co2_level).publish_state("Good");
+          } else if (v < 1000) {
+            id(co2_level).publish_state("Fair");
+          } else if (v < 1500) {
+            id(co2_level).publish_state("Mediocre - Ventilation recommended");
+          } else if (v < 2000) {
+            id(co2_level).publish_state("Bad - Ventilation required");
+          } else {
+            id(co2_level).publish_state("Bad - Heavily contaminated");
+          }
+
+          if (v < 600) {
+            id(co2_status).publish_state("Excellent air quality");
+          } else if (v < 800) {
+            id(co2_status).publish_state("Good air quality");
+          } else if (v < 1000) {
+            id(co2_status).publish_state("Fair air quality");
+          } else if (v < 1500) {
+            id(co2_status).publish_state("Mediocre - ventilation recommended");
+          } else if (v < 2000) {
+            id(co2_status).publish_state("Bad - ventilation required");
+          } else {
+            id(co2_status).publish_state("Bad - heavily contaminated indoor air");
+          }
+  - id: update_rebreathed_fraction
+    mode: queued
+    then:
+      - lambda: |-
+          float indoor = id(co2_ppm).state;
+          if (!isnan(indoor)) {
+            float rf = (indoor - 400.0f) / (38000.0f - 400.0f);
+            if (rf < 0.0f) rf = 0.0f;
+            id(rebreathed_fraction).publish_state(rf * 100.0f);
+          }
+
+number:
+  - platform: template
+    name: CO2 Refresh Rate
+    id: co2_refresh_rate
+    icon: mdi:timer-sand
+    min_value: 2
+    max_value: 180
+    optimistic: True
+    step: 1
+    initial_value: 10
+    unit_of_measurement: 's'
+    mode: box
+    restore_value: True
+    entity_category: config
+  - platform: template
+    name: CO2 Delta Trigger
+    id: co2_delta_trigger
+    icon: mdi:molecule-co2
+    min_value: 0
+    max_value: 500
+    step: 1
+    initial_value: 100
+    unit_of_measurement: 'ppm'
+    mode: box
+    optimistic: True
+    restore_value: True
+    entity_category: config
+
+light:
+  - platform: status_led
+    name: sys_status
+    pin: 
+      number: GPIO12
+      ignore_pin_validation_error: true
+    internal: True
+    restore_mode: ALWAYS_OFF
+  - platform: status_led
+    name: sys_status
+    pin: 
+      number: GPIO13
+      ignore_pin_validation_error: true
+    internal: True
+    restore_mode: ALWAYS_OFF
+
+button:
+  - platform: restart
+    icon: mdi:power-cycle
+    name: "ESP Reboot"
+  - platform: factory_reset
+    disabled_by_default: True
+    name: Factory Reset
+    id: factory_reset_all
