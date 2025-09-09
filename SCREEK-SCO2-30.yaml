@@ -93,7 +93,7 @@ binary_sensor:
 
 sensor:
   - platform: internal_temperature
-    name: "Internal Temperature"
+    name: "ESP Temperature"
     unit_of_measurement: °C
     device_class: TEMPERATURE
     update_interval: 30s
